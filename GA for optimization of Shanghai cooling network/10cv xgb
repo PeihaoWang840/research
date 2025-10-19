@@ -1,0 +1,37 @@
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+from sklearn.model_selection import cross_validate, train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
+
+# 读取数据
+file_path = r'D:\回归分析.xlsx'  # 请使用你的实际文件路径
+sheet_name = 'Sheet1313'
+data = pd.read_excel(file_path, sheet_name=sheet_name, header=1)
+
+# 选择目标变量 Y 和自变量 X
+Y = data.iloc[:, 1].values
+selected_columns = [2, 3, 4, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]  # 选择的列索引
+X = data.iloc[:, selected_columns].values
+
+# 处理 NaN 和 无穷值
+mask = ~np.isnan(X).any(axis=1) & ~np.isnan(Y) & ~np.isinf(Y)
+X_clean = X[mask]
+Y_clean = Y[mask]
+
+# 定义 XGBoost 回归模型
+model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=100, random_state=0)
+
+# 进行 10 折交叉验证
+cv_results = cross_validate(model, X_clean, Y_clean, cv=10,
+                            scoring=['neg_mean_squared_error', 'r2'], return_train_score=True)
+
+# 计算均方误差 (MSE) 和 R²
+mse_scores = -cv_results['test_neg_mean_squared_error']
+rmse_scores = np.sqrt(mse_scores)
+r2_scores = cv_results['test_r2']
+
+# 输出结果
+print(f"10-Fold CV MSE: {mse_scores.mean():.4f} ± {mse_scores.std():.4f}")
+print(f"10-Fold CV RMSE: {rmse_scores.mean():.4f} ± {rmse_scores.std():.4f}")
+print(f"10-Fold CV R²: {r2_scores.mean():.4f} ± {r2_scores.std():.4f}")

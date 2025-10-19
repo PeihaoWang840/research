@@ -1,0 +1,33 @@
+import numpy as np
+import pandas as pd
+from scipy.spatial.distance import cdist
+import matplotlib.pyplot as plt
+
+# 读取现有策略点数据
+existing_points_path = r"D:\冷源.xlsx"
+existing_data = pd.read_excel(existing_points_path)
+existing_x_coords = existing_data['X'].values
+existing_y_coords = existing_data['Y'].values
+
+# 参数设置
+
+r = 660  # 覆盖半径，单位与解空间中的坐标一致
+r_squared = r ** 2  # 避免在每次计算中求平方根
+b_D = r * 3000  # 距离衰减基准
+b_M = len(existing_x_coords)  # 现有节点数量
+
+
+# 计算连通性 f1 的函数
+def f1_calc(existing_x_coords, existing_y_coords, r, b_D, bn):
+    coords = np.column_stack((existing_x_coords, existing_y_coords))
+    dist_squared = cdist(coords, coords, 'sqeuclidean')  # 距离的平方
+    np.fill_diagonal(dist_squared, np.inf)  # 排除自身距离
+    
+    # 计算连通度
+    connectivity = np.exp(-dist_squared / b_D)
+    
+    f1_sum = connectivity.sum()
+    return 2 * f1_sum / ((bn - 1) * bn)
+
+result = f1_calc(existing_x_coords, existing_y_coords, r, b_D, b_M)
+print("F1 结果:", result)

@@ -1,0 +1,142 @@
+import numpy as np
+import pandas as pd
+from scipy.spatial.distance import cdist
+
+# 读取现有策略点数据
+existing_points_path = r"D:\\冷源.xlsx"
+existing_data = pd.read_excel(existing_points_path)
+existing_x_coords = existing_data['X'].values
+existing_y_coords = existing_data['Y'].values
+
+# 读取解空间数据（用于选择新增策略点）
+solution_space_path = r"D:\\解空间.xlsx"
+solution_space_data = pd.read_excel(solution_space_path)
+solution_space_coords = np.column_stack((solution_space_data['X'].values, solution_space_data['Y'].values))
+
+# 读取拟覆盖范围数据（用于计算f2）
+file_path = r"D:\\研究范围_去除660M缓冲.xlsx"
+df = pd.read_excel(file_path)
+research_x_coords = df['X'].values
+research_y_coords = df['Y'].values
+
+# 参数
+M = 60
+r = 660
+r_squared = r ** 2
+b_D = r * 3000
+b_M = len(existing_x_coords)
+bn = M + b_M
+pop_size = 200
+generations = 500
+alpha1 = 0.5
+alpha2 = 0.5
+
+def f1_calc(all_x_coords, all_y_coords, b_D, b_M):
+    coords = np.column_stack((all_x_coords, all_y_coords))
+    dist_squared = cdist(coords, coords, 'sqeuclidean')
+    np.fill_diagonal(dist_squared, np.inf)
+    f1_sum = np.exp(-dist_squared / b_D).sum()
+    return 2 * f1_sum / ((bn - 1) * bn)
+
+def f2_calc(new_x_coords, new_y_coords, research_x_coords, research_y_coords, r_squared):
+    new_coords = np.column_stack((new_x_coords, new_y_coords))
+    research_coords = np.column_stack((research_x_coords, research_y_coords))
+    dist_squared = cdist(research_coords, new_coords, 'sqeuclidean')
+    covered = np.any(dist_squared <= r_squared, axis=1)
+    coverage = covered.mean()
+    total_research_points = 35895
+    additional_value = 19525 / total_research_points
+    return coverage + additional_value
+
+def total_fitness(f1, f2, alpha1, alpha2):
+    return alpha1 * f1 + alpha2 * f2
+
+def initialize_population(M, pop_size, solution_space_coords):
+    population = []
+    for _ in range(pop_size):
+        selected_indices = np.random.choice(len(solution_space_coords), M, replace=False)
+        individual = solution_space_coords[selected_indices]
+        population.append(individual)
+    return np.array(population)
+
+def mutate(population, mutation_rate=0.1, solution_space_coords=None):
+    mutated_population = []
+    for individual in population:
+        if np.random.rand() < mutation_rate:
+            i = np.random.randint(len(individual))
+            individual[i] = solution_space_coords[np.random.randint(len(solution_space_coords))]
+        mutated_population.append(individual)
+    return np.array(mutated_population)
+
+def crossover(parent1, parent2, solution_space_coords):
+    crossover_point = np.random.randint(1, len(parent1) - 1)
+    child1 = np.vstack((parent1[:crossover_point], parent2[crossover_point:]))
+    child2 = np.vstack((parent2[:crossover_point], parent1[crossover_point:]))
+    for i in range(len(child1)):
+        if np.random.rand() < 0.5:
+            child1[i] = solution_space_coords[np.random.randint(len(solution_space_coords))]
+        if np.random.rand() < 0.5:
+            child2[i] = solution_space_coords[np.random.randint(len(solution_space_coords))]
+    return child1, child2
+
+def select_parents(population, fitnesses):
+    parents_idx = np.argsort(fitnesses)[-2:]
+    return population[parents_idx[0]], population[parents_idx[1]]
+
+def is_non_dominated(solution, solutions):
+    dominated = False
+    for other in solutions:
+        if other[0] >= solution[0] and other[1] >= solution[1] and (other[0] > solution[0] or other[1] > solution[1]):
+            dominated = True
+            break
+    return not dominated
+
+def genetic_algorithm(M, generations=500, pop_size=200, solution_space_coords=None):
+    population = initialize_population(M, pop_size, solution_space_coords)
+    all_solutions = []
+
+    for gen in range(generations):
+        fitnesses = []
+        generation_solutions = []
+
+        for individual in population:
+            all_x_coords = np.concatenate((existing_x_coords, individual[:, 0]))
+            all_y_coords = np.concatenate((existing_y_coords, individual[:, 1]))
+
+            f1 = f1_calc(all_x_coords, all_y_coords, b_D, b_M)
+            f2 = f2_calc(individual[:, 0], individual[:, 1], research_x_coords, research_y_coords, r_squared)
+
+            fitnesses.append(total_fitness(f1, f2, alpha1, alpha2))
+            generation_solutions.append((f1, f2))
+
+        all_solutions.extend(generation_solutions)
+        parent1, parent2 = select_parents(population, fitnesses)
+
+        new_population = []
+        for _ in range(pop_size // 2):
+            child1, child2 = crossover(parent1, parent2, solution_space_coords)
+            new_population.append(child1)
+            new_population.append(child2)
+
+        population = mutate(np.array(new_population), solution_space_coords=solution_space_coords)
+
+    # 计算非支配解集
+    unique_solutions = np.unique(all_solutions, axis=0)
+    non_dominated_solutions = [sol for sol in unique_solutions if is_non_dominated(sol, unique_solutions)]
+
+    return all_solutions, non_dominated_solutions
+
+# 运行遗传算法
+all_solutions, non_dominated_solutions = genetic_algorithm(M, generations, pop_size, solution_space_coords)
+
+# 保存结果到 Excel
+all_solutions_df = pd.DataFrame(all_solutions, columns=['F1', 'F2'])
+non_dominated_solutions_df = pd.DataFrame(non_dominated_solutions, columns=['F1', 'F2'])
+
+all_solutions_path = r"D:\\所有一般解.xlsx"
+non_dominated_solutions_path = r"D:\\最优非支配解集.xlsx"
+
+all_solutions_df.to_excel(all_solutions_path, index=False)
+non_dominated_solutions_df.to_excel(non_dominated_solutions_path, index=False)
+
+print("所有一般解和最优非支配解集已保存到 D 盘根目录。")

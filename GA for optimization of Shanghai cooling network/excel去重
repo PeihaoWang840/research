@@ -1,0 +1,12 @@
+import pandas as pd
+
+# 读取 Excel 文件
+file_path = r'D:\pareto_solutions_1.xlsx'  # 替换为您的 Excel 文件路径
+df = pd.read_excel(file_path)
+
+# 删除重复行，只保留唯一行
+df_unique = df.drop_duplicates()
+
+# 保存为新的 Excel 文件到 D 盘根目录
+df_unique.to_excel('D:/unique_rows_file.xlsx', index=False)
+print("重复行已删除，结果已保存到 D:/unique_rows_file.xlsx")

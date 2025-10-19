@@ -1,0 +1,18 @@
+import pandas as pd
+import os
+
+# 参数设置
+input_file = r'D:\ChinaCrime.csv'  # 注意文件路径中的空格和中文
+output_folder = r'D:\ChinaCrime_splits'  # 输出文件夹
+rows_per_file = 40000  # 每个小文件包含的行数
+
+# 确保输出文件夹存在
+os.makedirs(output_folder, exist_ok=True)
+
+# 分块读取并保存
+for i, chunk in enumerate(pd.read_csv(input_file, chunksize=rows_per_file)):
+    output_path = os.path.join(output_folder, f'china_crime_part_{i+1}.csv')
+    chunk.to_csv(output_path, index=False)
+    print(f'已写入：{output_path}（共 {len(chunk)} 行）')
+
+print("✅ 分割完成！")

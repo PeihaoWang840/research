@@ -1,0 +1,219 @@
+import numpy as np
+import pandas as pd
+from scipy.spatial.distance import cdist
+
+# 读取现有策略点数据
+existing_points_path = r"D:\冷源.xlsx"
+existing_data = pd.read_excel(existing_points_path)
+existing_x_coords = existing_data['X'].values
+existing_y_coords = existing_data['Y'].values
+
+# 读取解空间数据（用于选择新增策略点）
+solution_space_path = r"D:\解空间.xlsx"
+solution_space_data = pd.read_excel(solution_space_path)
+solution_space_coords = np.column_stack((solution_space_data['X'].values, solution_space_data['Y'].values))
+
+# 读取拟覆盖范围数据（用于计算f2）
+file_path = r"D:\研究范围_去除660M缓冲.xlsx"
+df = pd.read_excel(file_path)
+research_x_coords = df['X'].values
+research_y_coords = df['Y'].values
+
+# 参数
+M = 30 # 新增策略点数量
+r = 660  # 覆盖半径，单位与解空间中的坐标一致
+r_squared = r ** 2  # 避免在每次计算中求平方根
+b_D = r * 2  # 距离衰减基准
+b_M = len(existing_x_coords)  # 设为节点数量
+pop_size = 200  # 种群大小
+generations = 500  # 遗传算法的迭代次数
+alpha1 = 1  # f1 的权重，增大以优先优化连通性
+alpha2 = 0  # f2 的权重
+min_distance = 552  # 新增策略点之间的最小距离
+min_distance_squared = min_distance ** 2  # 避免在每次计算中求平方根
+
+# 计算连通性 f1 的函数
+def f1_calc(all_x_coords, all_y_coords, r, b_D, bn):
+    coords = np.column_stack((all_x_coords, all_y_coords))
+    dist_squared = cdist(coords, coords, 'sqeuclidean')  # 距离的平方
+    np.fill_diagonal(dist_squared, np.inf)  # 排除自身距离
+    
+    # 计算连通度矩阵
+    connectivity = np.where(dist_squared <= r_squared, 1, np.exp(-dist_squared / b_D))
+    
+    f1_sum = connectivity.sum()
+    return f1_sum / (bn)  # 修改后的F1计算公式
+
+# 计算覆盖率 f2 的函数
+def f2_calc(new_x_coords, new_y_coords, research_x_coords, research_y_coords, r_squared):
+    new_coords = np.column_stack((new_x_coords, new_y_coords))
+    research_coords = np.column_stack((research_x_coords, research_y_coords))
+    
+    # 计算研究点到新增策略点的平方距离
+    dist_squared = cdist(research_coords, new_coords, 'sqeuclidean')
+    
+    # 判断哪些点被覆盖
+    covered = np.any(dist_squared <= r_squared, axis=1)
+    
+    # 计算被覆盖的点的数量
+    covered_count = np.sum(covered)
+    
+    # 计算覆盖率
+    coverage = covered_count / 35895  # 总研究点数量 35895
+    
+    # 加入常数值
+    additional_value = 19525 / 35895
+    f2_value = coverage + additional_value
+    
+    # 设置 f2 的下限
+    return max(f2_value, 0.5)
+
+# 计算总适应度的函数
+def total_fitness(f1, f2, alpha1, alpha2):
+    return alpha1 * f1 + alpha2 * f2
+
+# 检查是否存在重复点
+def has_duplicate_points(coords):
+    unique_coords = np.unique(coords, axis=0)
+    return len(unique_coords) < len(coords)
+
+# 检查新增策略点之间的距离是否不小于 min_distance
+def has_minimum_distance(coords, min_distance_squared):
+    dist_squared = cdist(coords, coords, 'sqeuclidean')
+    np.fill_diagonal(dist_squared, np.inf)  # 排除自身距离
+    return np.all(dist_squared >= min_distance_squared)
+
+# 初始化种群：从解空间中随机选择 M 个新增策略点，保证无重复点且距离不小于 min_distance
+def initialize_population(M, pop_size, solution_space_coords, min_distance_squared):
+    population = []
+    for _ in range(pop_size):
+        while True:
+            selected_indices = np.random.choice(len(solution_space_coords), M, replace=False)
+            individual = solution_space_coords[selected_indices]
+            if not has_duplicate_points(individual) and has_minimum_distance(individual, min_distance_squared):
+                break
+        population.append(individual)
+    
+    return np.array(population)
+
+# 变异函数，确保变异后无重复点且距离不小于 min_distance
+def mutate(population, mutation_rate=0.1, solution_space_coords=None, min_distance_squared=None):
+    mutated_population = []
+    for individual in population:
+        if np.random.rand() < mutation_rate:
+            while True:
+                i = np.random.randint(len(individual))
+                # 从解空间的点集中随机选取新策略点
+                individual[i] = solution_space_coords[np.random.randint(len(solution_space_coords))]
+                if not has_duplicate_points(individual) and has_minimum_distance(individual, min_distance_squared):
+                    break
+        mutated_population.append(individual)
+    return np.array(mutated_population)
+
+# 交叉函数，确保交叉后无重复点且距离不小于 min_distance
+def crossover(parent1, parent2, solution_space_coords, min_distance_squared):
+    while True:
+        crossover_point = np.random.randint(1, len(parent1) - 1)
+        child1 = np.vstack((parent1[:crossover_point], parent2[crossover_point:]))
+        child2 = np.vstack((parent2[:crossover_point], parent1[crossover_point:]))
+        
+        # 确保交叉后子代的点无重复且符合距离要求
+        if not has_duplicate_points(child1) and not has_duplicate_points(child2) and \
+           has_minimum_distance(child1, min_distance_squared) and has_minimum_distance(child2, min_distance_squared):
+            break
+
+    return child1, child2
+
+# 选择父母代函数
+def select_parents(population, fitnesses):
+    parents_idx = np.argsort(fitnesses)[-2:]  # 选择适应度最高的两个个体
+    return population[parents_idx[0]], population[parents_idx[1]]
+
+# 遗传算法主循环
+def genetic_algorithm(M, generations=1000, pop_size=500, solution_space_coords=None, min_distance_squared=None):
+    population = initialize_population(M, pop_size, solution_space_coords, min_distance_squared)
+    best_fitness = -np.inf
+    no_improvement_count = 0
+    elitism_size = 2  # 精英保留策略
+    
+    for gen in range(generations):
+        fitnesses = []
+        for individual in population:
+            # 结合现有策略点和新增策略点
+            all_x_coords = np.concatenate((existing_x_coords, individual[:, 0]))
+            all_y_coords = np.concatenate((existing_y_coords, individual[:, 1]))
+            bn = b_M + M  # 策略点总数
+
+            # 计算适应度
+            f1 = f1_calc(all_x_coords, all_y_coords, r, b_D, bn)
+            f2 = f2_calc(individual[:, 0], individual[:, 1], research_x_coords, research_y_coords, r_squared)
+            fitness = total_fitness(f1, f2, alpha1, alpha2)
+            fitnesses.append(fitness)
+
+        # 选择最优的父母代
+        parent1, parent2 = select_parents(population, fitnesses)
+
+        # 生成新一代种群
+        new_population = []
+        for _ in range((pop_size - elitism_size) // 2):
+            child1, child2 = crossover(parent1, parent2, solution_space_coords, min_distance_squared)
+            new_population.append(child1)
+            new_population.append(child2)
+
+        # 加入精英个体到新种群
+        elite_individuals = population[np.argsort(fitnesses)[-elitism_size:]]
+        new_population.extend(elite_individuals)
+
+        # 进行变异，确保无重复点且符合距离要求
+        population = mutate(np.array(new_population), solution_space_coords=solution_space_coords, min_distance_squared=min_distance_squared)
+
+        # Early stopping based on fitness improvement
+        max_fitness = max(fitnesses)
+        if max_fitness > best_fitness:
+            best_fitness = max_fitness
+            best_individual = population[np.argmax(fitnesses)]
+            no_improvement_count = 0
+        else:
+            no_improvement_count += 1
+
+        if no_improvement_count >= 100:  # Early stopping condition
+            print(f"Early stopping at generation {gen}")
+            break
+
+    return best_individual, best_fitness
+
+# 运行多次遗传算法，选择适应度最大的解
+def run_multiple_times(times, M, generations, pop_size, solution_space_coords, min_distance_squared):
+    best_overall_fitness = -np.inf
+    best_overall_individual = None
+    
+    for _ in range(times):
+        best_individual, best_fitness = genetic_algorithm(M, generations, pop_size, solution_space_coords, min_distance_squared)
+        if best_fitness > best_overall_fitness:
+            best_overall_fitness = best_fitness
+            best_overall_individual = best_individual
+    
+    return best_overall_individual, best_overall_fitness
+
+# 运行 1 次遗传算法，选择适应度最大的解
+best_individual, best_fitness = run_multiple_times(1, M, generations, pop_size, solution_space_coords, min_distance_squared)
+
+# 将现有策略点与新增策略点组合起来
+final_x_coords = np.concatenate((existing_x_coords, best_individual[:, 0]))
+final_y_coords = np.concatenate((existing_y_coords, best_individual[:, 1]))
+
+# 计算最终策略点网络的连通性 f1 和覆盖率 f2
+final_f1 = f1_calc(final_x_coords, final_y_coords, r, b_D, b_M + M)
+final_f2 = f2_calc(best_individual[:, 0], best_individual[:, 1], research_x_coords, research_y_coords, r_squared)
+
+# 输出最终的 f1 和 f2 以及总适应度
+print("最终策略点网络的连通性 f1:", final_f1)
+print("最终策略点网络的覆盖率 f2:", final_f2)
+print("最终的总适应度:", alpha1 * final_f1 + alpha2 * final_f2)
+
+# 输出结果到 Excel 文件
+output_path = r"D:\1015-new-r660-n2-24.xlsx"
+output_df = pd.DataFrame({'X': best_individual[:, 0], 'Y': best_individual[:, 1]})
+output_df.to_excel(output_path, index=False)
+
+print("新增策略点（x, y）坐标已写入:", output_path)

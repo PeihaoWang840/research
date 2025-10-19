@@ -1,0 +1,229 @@
+import numpy as np
+import pandas as pd
+from scipy.spatial.distance import cdist
+import matplotlib.pyplot as plt
+
+# 读取现有策略点数据
+existing_points_path = r"D:\冷源.xlsx"
+existing_data = pd.read_excel(existing_points_path)
+existing_x_coords = existing_data['X'].values
+existing_y_coords = existing_data['Y'].values
+
+# 读取解空间数据（用于选择新增策略点）
+solution_space_path = r"D:\解空间.xlsx"
+solution_space_data = pd.read_excel(solution_space_path)
+solution_space_coords = np.column_stack((solution_space_data['X'].values, solution_space_data['Y'].values))
+
+# 读取拟覆盖范围数据（用于计算 f2）
+file_path = r"D:\研究范围_去除660M缓冲.xlsx"
+df = pd.read_excel(file_path)
+research_x_coords = df['X'].values
+research_y_coords = df['Y'].values
+
+# 参数设置
+M = 60  # 新增策略点数量
+r = 660  # 覆盖半径，单位与解空间中的坐标一致
+r_squared = r ** 2  # 避免在每次计算中求平方根
+b_D = r * 3000  # 距离衰减基准
+b_M = len(existing_x_coords)  # 现有节点数量
+pop_size = 200  # 种群大小
+generations = 500  # 遗传算法的迭代次数
+alpha1 = 0.5  # f1 的权重，增大以优先优化连通性
+alpha2 = 0.5  # f2 的权重
+min_distance = 552  # 新增策略点之间的最小距离
+
+# 计算连通性 f1 的函数
+def f1_calc(all_x_coords, all_y_coords, r, b_D, bn):
+    coords = np.column_stack((all_x_coords, all_y_coords))
+    dist_squared = cdist(coords, coords, 'sqeuclidean')  # 距离的平方
+    np.fill_diagonal(dist_squared, np.inf)  # 排除自身距离
+    
+    # 计算连通度
+    connectivity = np.exp(-dist_squared / b_D)
+    
+    f1_sum = connectivity.sum()
+    return 2 * f1_sum / ((bn - 1) * bn)
+
+# 计算覆盖率 f2 的函数
+def f2_calc(new_x_coords, new_y_coords, research_x_coords, research_y_coords, r_squared):
+    new_coords = np.column_stack((new_x_coords, new_y_coords))
+    research_coords = np.column_stack((research_x_coords, research_y_coords))
+    
+    # 计算研究点到新增策略点的平方距离
+    dist_squared = cdist(research_coords, new_coords, 'sqeuclidean')
+    
+    # 判断哪些点被覆盖
+    covered = np.any(dist_squared <= r_squared, axis=1)
+    
+    # 计算被覆盖的点的数量
+    covered_count = np.sum(covered)
+    
+    # 计算覆盖率
+    coverage = covered_count / 35895  # 总研究点数量 35895
+    
+    # 加入常数值
+    additional_value = 19525 / 35895
+    return coverage + additional_value
+
+# 计算总适应度的函数
+def total_fitness(f1, f2, alpha1, alpha2):
+    return alpha1 * f1 + alpha2 * f2
+
+# 检查新增策略点之间的最小距离
+def check_min_distance(new_coords, min_distance):
+    dist_matrix = cdist(new_coords, new_coords, 'euclidean')
+    np.fill_diagonal(dist_matrix, np.inf)  # 排除自身距离
+    return np.all(dist_matrix >= min_distance)
+
+# 初始化种群：从解空间中随机选择 M 个新增策略点
+def initialize_population(M, pop_size, solution_space_coords):
+    population = []
+    for _ in range(pop_size):
+        while True:
+            selected_indices = np.random.choice(len(solution_space_coords), M, replace=False)
+            individual = solution_space_coords[selected_indices]
+            # 检查距离约束
+            if check_min_distance(individual, min_distance):
+                population.append(individual)
+                break
+    
+    return np.array(population)
+
+# 变异函数
+def mutate(population, mutation_rate=0.1, solution_space_coords=None):
+    mutated_population = []
+    for individual in population:
+        if np.random.rand() < mutation_rate:
+            i = np.random.randint(len(individual))
+            # 从解空间的点集中随机选取新策略点
+            new_point = solution_space_coords[np.random.randint(len(solution_space_coords))]
+            # 替换策略点并检查距离约束
+            temp_individual = np.copy(individual)
+            temp_individual[i] = new_point
+            if check_min_distance(temp_individual, min_distance):
+                individual[i] = new_point  # 仅在满足约束时替换
+        mutated_population.append(individual)
+    return np.array(mutated_population)
+
+# 交叉函数
+def crossover(parent1, parent2, solution_space_coords):
+    crossover_point = np.random.randint(1, len(parent1) - 1)
+    child1 = np.vstack((parent1[:crossover_point], parent2[crossover_point:]))
+    child2 = np.vstack((parent2[:crossover_point], parent1[crossover_point:]))
+
+    # 确保交叉后子代的点来自解空间点集
+    for i in range(len(child1)):
+        if np.random.rand() < 0.5:
+            child1[i] = solution_space_coords[np.random.randint(len(solution_space_coords))]
+        if np.random.rand() < 0.5:
+            child2[i] = solution_space_coords[np.random.randint(len(solution_space_coords))]
+
+    # 检查距离约束
+    if not check_min_distance(child1, min_distance):
+        child1 = parent1  # 如果不满足约束，保持父代不变
+    if not check_min_distance(child2, min_distance):
+        child2 = parent2  # 如果不满足约束，保持父代不变
+
+    return child1, child2
+
+# 选择父母代函数
+def select_parents(population, fitnesses):
+    parents_idx = np.argsort(fitnesses)[-2:]  # 选择适应度最高的两个个体
+    return population[parents_idx[0]], population[parents_idx[1]]
+
+# 遗传算法主循环
+def genetic_algorithm(M, generations=1000, pop_size=500, solution_space_coords=None):
+    population = initialize_population(M, pop_size, solution_space_coords)
+    best_solutions = []  # 存储所有帕累托前沿解
+    
+    for gen in range(generations):
+        fitnesses = []
+        for individual in population:
+            # 结合现有策略点和新增策略点
+            all_x_coords = np.concatenate((existing_x_coords, individual[:, 0]))
+            all_y_coords = np.concatenate((existing_y_coords, individual[:, 1]))
+            bn = b_M + M  # 策略点总数
+
+            # 计算适应度
+            f1 = f1_calc(all_x_coords, all_y_coords, r, b_D, bn)
+            f2 = f2_calc(individual[:, 0], individual[:, 1], research_x_coords, research_y_coords, r_squared)
+            fitness = total_fitness(f1, f2, alpha1, alpha2)
+            fitnesses.append(fitness)
+
+            # 保存帕累托前沿解
+            best_solutions.append((individual, f1, f2))
+
+        # 选择最优的父母代
+        parent1, parent2 = select_parents(population, fitnesses)
+
+        # 生成新一代种群
+        new_population = []
+        for _ in range((pop_size) // 2):
+            child1, child2 = crossover(parent1, parent2, solution_space_coords)
+            new_population.append(child1)
+            new_population.append(child2)
+
+        # 加入精英个体到新种群
+        elite_individuals = population[np.argsort(fitnesses)[-2:]]
+        new_population.extend(elite_individuals)
+
+        # 进行变异
+        population = mutate(np.array(new_population), solution_space_coords=solution_space_coords)
+
+    return best_solutions  # 返回帕累托前沿解
+
+# 执行遗传算法
+best_solutions = genetic_algorithm(M, generations, pop_size, solution_space_coords)
+
+# 将解点按F1值从小到大排序
+sorted_solutions = sorted(best_solutions, key=lambda x: x[1])
+
+# 导出数据到单一 Excel 文件
+with pd.ExcelWriter(r'D:\pareto_solutions_summary_2.xlsx') as writer:
+    # 创建一个表格汇总所有帕累托前沿解
+    all_solutions = []
+    for idx, (individual, f1, f2) in enumerate(sorted_solutions):
+        x_coords = individual[:, 0]
+        y_coords = individual[:, 1]
+        solution_df = pd.DataFrame({
+            'X': x_coords,
+            'Y': y_coords,
+            'F1': f1,
+            'F2': f2,
+            'Solution_ID': idx + 1
+        })
+        all_solutions.append(solution_df)
+    
+    # 将所有解点数据合并成一个 DataFrame 并写入同一个工作表
+    result_df = pd.concat(all_solutions, ignore_index=True)
+    result_df.to_excel(writer, sheet_name='Pareto_Solutions', index=False)
+
+
+# 绘制帕累托曲线
+def plot_pareto_curve(all_solutions):
+    f1_values = [sol[1] for sol in all_solutions]
+    f2_values = [sol[2] for sol in all_solutions]
+
+    # 计算统一的坐标范围
+    min_val = min(min(f1_values), min(f2_values))
+    max_val = max(max(f1_values), max(f2_values))
+
+    plt.figure(figsize=(10, 6))
+    plt.scatter(f1_values, f2_values, c='blue', label='Pareto Front')
+    
+    # 绘制左上到右下的对角线
+    plt.plot([max_val, min_val], [min_val, max_val], 'r--', label='Ideal diagonal')
+    
+    # 均衡轴范围并设定相同的比例
+    plt.xlim(min_val, max_val)
+    plt.ylim(min_val, max_val)
+    plt.xlabel('f1 (Connectivity)')
+    plt.ylabel('f2 (Coverage)')
+    plt.title('Pareto Front with Left-Top to Right-Bottom Diagonal')
+    plt.grid()
+    plt.legend()
+    plt.axis('equal')  # 设置比例一致，确保对角线为45度
+    plt.show()
+
+# 绘制改进后的帕累托曲线
+plot_pareto_curve(best_solutions)
