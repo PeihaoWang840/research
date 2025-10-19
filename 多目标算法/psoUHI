@@ -1,0 +1,196 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.spatial.distance import cdist
+
+# 读取数据
+try:
+    existing_data = pd.read_excel(r"D:\冷源.xlsx")
+    existing_x_coords = existing_data['X'].values
+    existing_y_coords = existing_data['Y'].values
+
+    solution_space_data = pd.read_excel(r"D:\解空间.xlsx")
+    solution_space_coords = np.column_stack((solution_space_data['X'].values, solution_space_data['Y'].values))
+
+    df = pd.read_excel(r"D:\研究范围_去除660M缓冲.xlsx")
+    research_x_coords = df['X'].values
+    research_y_coords = df['Y'].values
+except Exception as e:
+    print(f"数据读取失败: {e}")
+    exit()
+
+# 参数
+M = 60  
+r = 660  
+r_squared = r ** 2  
+b_D = r * 3000  
+b_M = len(existing_x_coords)  
+alpha1 = 0.5  
+alpha2 = 0.5  
+min_distance = 552  
+
+# 计算 f1（网络连接性）
+def f1_calc(all_x_coords, all_y_coords, r, b_D, bn):
+    if bn <= 1:
+        return 0  
+    coords = np.column_stack((all_x_coords, all_y_coords))
+    dist_squared = cdist(coords, coords, 'sqeuclidean')
+    np.fill_diagonal(dist_squared, np.inf)
+    connectivity = np.exp(-dist_squared / max(b_D, 1e-5))
+    return 2 * connectivity.sum() / ((bn - 1) * bn)
+
+# 计算 f2（覆盖率）
+def f2_calc(new_x_coords, new_y_coords, research_x_coords, research_y_coords, solution_space_coords, r_squared):
+    """
+    计算 F2（覆盖率）- 研究点必须被半径 r 内的所有解空间点选为策略点，才计入覆盖度。
+
+    参数:
+        new_x_coords: 新增策略点的 X 坐标
+        new_y_coords: 新增策略点的 Y 坐标
+        research_x_coords: 研究点的 X 坐标
+        research_y_coords: 研究点的 Y 坐标
+        solution_space_coords: 解空间所有可选点的坐标 (N, 2)
+        r_squared: 覆盖半径的平方 (r^2)
+
+    返回:
+        F2 覆盖率
+    """
+    if len(new_x_coords) == 0:
+        return 0  # 没有策略点，F2 为 0
+
+    research_coords = np.column_stack((research_x_coords, research_y_coords))
+    selected_coords = np.column_stack((new_x_coords, new_y_coords))
+
+    # 计算研究点到解空间点的距离平方
+    dist_to_solution = cdist(research_coords, solution_space_coords, 'sqeuclidean')
+
+    # 计算研究点到策略点的距离平方
+    dist_to_selected = cdist(solution_space_coords, selected_coords, 'sqeuclidean')
+
+    # 遍历所有研究点，检查其 r 半径内的解空间点是否全被选为策略点
+    fully_covered = []
+    for i in range(len(research_coords)):
+        # 获取研究点 r 范围内的解空间点索引
+        nearby_indices = np.where(dist_to_solution[i] <= r_squared)[0]
+
+        if len(nearby_indices) == 0:
+            fully_covered.append(False)  # 没有解空间点在半径内，无法覆盖
+            continue
+
+        # 检查这些解空间点是否都被选为策略点
+        solution_points_in_radius = solution_space_coords[nearby_indices]
+
+        # 计算这些点是否都在 `selected_coords` 中
+        covered = np.all([any(np.all(point == selected_coords, axis=1)) for point in solution_points_in_radius])
+        fully_covered.append(covered)
+
+    # 计算最终覆盖率
+    coverage_rate = np.sum(fully_covered) / len(research_coords)
+
+    return coverage_rate
+# 计算总适应度
+def total_fitness(f1, f2, alpha1, alpha2):
+    return alpha1 * f1 + alpha2 * f2
+
+# PSO 参数
+num_particles = 50 
+num_iterations = 100  
+w = 0.7  
+c1, c2 = 1.5, 1.5  
+velocity = np.zeros((num_particles, M, 2))  
+
+# 初始化粒子群
+population = np.array([
+    solution_space_coords[np.random.choice(len(solution_space_coords), M, replace=False)]
+    for _ in range(num_particles)
+], dtype=np.float64)  
+
+p_best = np.copy(population)
+p_best_fitness = np.full(num_particles, -np.inf)
+g_best = None
+g_best_fitness = -np.inf
+
+# 记录所有解
+f1_list, f2_list, solution_list = [], [], []
+
+print(f"粒子数: {num_particles}, 迭代次数: {num_iterations}")
+if num_particles <= 0 or num_iterations <= 0:
+    raise ValueError("错误: num_particles 或 num_iterations 不能小于等于 0")
+
+# PSO 迭代
+for _ in range(num_iterations):
+    fitnesses = []
+    
+    for i in range(num_particles):
+        all_x_coords = np.concatenate((existing_x_coords, population[i][:, 0]))
+        all_y_coords = np.concatenate((existing_y_coords, population[i][:, 1]))
+
+        f1 = f1_calc(all_x_coords, all_y_coords, r, b_D, b_M + M)
+        f2 = f2_calc(population[i][:, 0], population[i][:, 1], research_x_coords, research_y_coords, r_squared)
+
+        if np.isnan(f1) or np.isnan(f2):
+            raise ValueError(f"错误: 计算得到 NaN, f1={f1}, f2={f2}")        
+        
+        fitness = total_fitness(f1, f2, alpha1, alpha2)
+
+        fitnesses.append(fitness)
+        
+        f1_list.append(f1)
+        f2_list.append(f2)
+        solution_list.append(population[i])
+        
+        if fitness > p_best_fitness[i]:
+            p_best[i] = population[i]
+            p_best_fitness[i] = fitness
+
+    if len(fitnesses) == 0:
+        print("警告: fitnesses 为空，跳过本次迭代")
+        continue
+
+    best_idx = np.argmax(fitnesses)
+    if fitnesses[best_idx] > g_best_fitness:
+        g_best = population[best_idx]
+        g_best_fitness = fitnesses[best_idx]
+
+print(f"最优解的适应度值: {g_best_fitness}")
+
+# 计算 Pareto 前沿
+pareto_front = []
+pareto_solutions = []
+for i in range(len(f1_list)):
+    dominated = False
+    for j in range(len(f1_list)):
+        if (f1_list[j] >= f1_list[i] and f2_list[j] >= f2_list[i]) and (f1_list[j] > f1_list[i] or f2_list[j] > f2_list[i]):
+            dominated = True
+            break
+    if not dominated:
+        pareto_front.append((f1_list[i], f2_list[i]))
+        pareto_solutions.append(solution_list[i])
+
+if len(pareto_solutions) == 0:
+    print("警告: 帕累托前沿解集为空，使用全局最优解")
+    pareto_solutions.append(g_best)
+
+pareto_data = []
+for i, (f1, f2) in enumerate(pareto_front):
+    for j, (x, y) in enumerate(pareto_solutions[i]):
+        pareto_data.append([f1, f2, j+1, x, y])  
+
+pareto_df = pd.DataFrame(pareto_data, columns=['f1', 'f2', '点序号', 'X', 'Y'])
+pareto_df.to_excel(r'D:\pareto_front_pso.xlsx', index=False)
+print("完整的帕累托前沿解已保存到: D:\\pareto_front_pso.xlsx")
+
+# 绘制帕累托前沿
+plt.figure(figsize=(8, 6))
+plt.scatter(f1_list, f2_list, label="所有解", alpha=0.3, color="gray")
+pareto_f1, pareto_f2 = zip(*pareto_front)
+plt.scatter(pareto_f1, pareto_f2, color="red", label="帕累托前沿", edgecolors="black", s=50)
+
+plt.xlabel("f1 (网络连接性)")
+plt.ylabel("f2 (覆盖率)")
+plt.title("帕累托前沿图")
+plt.legend()
+plt.grid()
+plt.savefig(r'D:\pareto_front.png', dpi=300, bbox_inches='tight')
+plt.show()
+print("帕累托前沿图已保存到: D:\\pareto_front_pso.png")

@@ -1,0 +1,155 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.spatial.distance import cdist
+from deap import base, creator, tools, algorithms
+
+# 读取数据
+try:
+    existing_data = pd.read_excel(r"D:\YZRD_UHI_data\warmpeak.xlsx")
+    existing_x_coords = existing_data['X'].values
+    existing_y_coords = existing_data['Y'].values
+
+    solution_space_data = pd.read_excel(r"D:\YZRD_UHI_data\solutionspace.xlsx")
+    # 获取坐标并去重
+    coords_array = np.column_stack((solution_space_data['X'].values, solution_space_data['Y'].values))
+    unique_coords, unique_indices = np.unique(coords_array, axis=0, return_index=True)
+    solution_space_coords = unique_coords
+    solution_sensitivity = solution_space_data['sensitivity'].values[unique_indices]  # 对应敏感度也要同步取值
+
+    df = pd.read_excel(r"D:\YZRD_UHI_data\coverpoint.xlsx")
+    research_x_coords = df['X'].values
+    research_y_coords = df['Y'].values
+except Exception as e:
+    print(f"数据读取失败: {e}")
+    exit()
+
+# 参数
+M = 100  
+r = 1500  
+r_squared = r ** 2  
+b_D = r * 3000  
+b_M = len(existing_x_coords)  
+alpha1 = 1
+alpha2 = 1
+alpha3 = 1   
+bn = M + b_M
+
+# 计算 f1（网络连接性）
+def f1_calc(all_x_coords, all_y_coords, r, b_D, bn):
+    if bn <= 1:
+        return 0  
+    coords = np.column_stack((all_x_coords, all_y_coords))
+    dist_squared = cdist(coords, coords, 'sqeuclidean')
+    np.fill_diagonal(dist_squared, np.inf)
+    connectivity = np.exp(-dist_squared / max(b_D, 1e-5))
+    return 2 * connectivity.sum() / ((bn - 1) * bn)
+
+# 计算 f2（覆盖率）
+def f2_calc(new_x_coords, new_y_coords, research_x_coords, research_y_coords, solution_space_coords, r_squared):
+    if len(new_x_coords) == 0:
+        return 0  
+    research_coords = np.column_stack((research_x_coords, research_y_coords))
+    selected_coords = np.column_stack((new_x_coords, new_y_coords))
+    dist_to_solution = cdist(research_coords, solution_space_coords, 'sqeuclidean')
+    dist_to_selected = cdist(solution_space_coords, selected_coords, 'sqeuclidean')
+    fully_covered = []
+    for i in range(len(research_coords)):
+        nearby_indices = np.where(dist_to_solution[i] <= r_squared)[0]
+        if len(nearby_indices) == 0:
+            fully_covered.append(False)
+            continue
+        solution_points_in_radius = solution_space_coords[nearby_indices]
+        covered = np.all([any(np.all(point == selected_coords, axis=1)) for point in solution_points_in_radius])
+        fully_covered.append(covered)
+    return np.sum(fully_covered) / len(research_coords)
+
+# 计算 f3（敏感度平均值）
+def f3_calc(selected_indices, solution_sensitivity):
+    selected_sensitivity = solution_sensitivity[selected_indices]
+    return np.mean(selected_sensitivity)
+
+# NSGA-II 相关设置
+creator.create("FitnessMulti", base.Fitness, weights=(alpha1, alpha2, alpha3))  # 三个目标
+creator.create("Individual", list, fitness=creator.FitnessMulti)
+
+# 初始化个体
+def init_individual():
+    indices = np.random.choice(len(solution_space_coords), M, replace=False)
+    return creator.Individual(solution_space_coords[indices].tolist())
+
+toolbox = base.Toolbox()
+toolbox.register("individual", init_individual)
+toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+# 适应度评估函数
+def evaluate(ind):
+    new_x_coords, new_y_coords = np.array(ind)[:, 0], np.array(ind)[:, 1]
+    all_x_coords = np.concatenate((existing_x_coords, new_x_coords))
+    all_y_coords = np.concatenate((existing_y_coords, new_y_coords))
+
+    f1 = f1_calc(all_x_coords, all_y_coords, r, b_D, b_M + M)
+    f2 = f2_calc(new_x_coords, new_y_coords, research_x_coords, research_y_coords, solution_space_coords, r_squared)
+
+    # 获取个体中坐标在 solution_space 中的索引
+    ind_coords = np.array(ind)
+    selected_indices = [np.where((solution_space_coords == point).all(axis=1))[0][0] for point in ind_coords]
+    f3 = f3_calc(selected_indices, solution_sensitivity)
+
+
+    return f1, f2, f3
+
+toolbox.register("evaluate", evaluate)
+toolbox.register("mate", tools.cxTwoPoint)
+def custom_mutation(individual, indpb=0.2):
+    for i in range(len(individual)):
+        if np.random.rand() < indpb:
+            # 替换为新的坐标点
+            new_point = solution_space_coords[np.random.choice(len(solution_space_coords))]
+            individual[i] = new_point.tolist()
+    return individual,
+
+toolbox.register("mutate", custom_mutation)
+toolbox.register("select", tools.selNSGA2)
+
+# 运行 NSGA-II
+pop_size = 30
+num_generations = 100
+pop = toolbox.population(n=pop_size)
+algorithms.eaMuPlusLambda(pop, toolbox, mu=pop_size, lambda_=pop_size, cxpb=0.7, mutpb=0.2, ngen=num_generations, 
+                          stats=None, halloffame=None, verbose=True)
+
+# 提取帕累托前沿解
+pareto_front = tools.sortNondominated(pop, len(pop), first_front_only=True)[0]
+pareto_solutions = [ind for ind in pareto_front]
+pareto_data = []
+for ind in pareto_solutions:
+    f1, f2, f3 = ind.fitness.values
+    for j, (x, y) in enumerate(ind):
+        pareto_data.append([f1, f2, f3, j+1, x, y])
+
+pareto_df = pd.DataFrame(pareto_data, columns=['f1', 'f2', 'f3', '点序号', 'X', 'Y'])
+pareto_df.to_excel(r'D:\pareto_front_nsga2_with_f3_M100.xlsx', index=False)
+print("帕累托前沿解已保存到: D:\pareto_front_nsga2.xlsx")
+
+# 绘制帕累托前沿图
+from mpl_toolkits.mplot3d import Axes3D
+
+# 绘制三维帕累托前沿图
+f1_list, f2_list, f3_list = zip(*[ind.fitness.values for ind in pop])
+pareto_f1, pareto_f2, pareto_f3 = zip(*[ind.fitness.values for ind in pareto_solutions])
+
+fig = plt.figure(figsize=(10, 8))
+ax = fig.add_subplot(111, projection='3d')
+ax.scatter(f1_list, f2_list, f3_list, label="所有解", alpha=0.3, color="gray")
+ax.scatter(pareto_f1, pareto_f2, pareto_f3, color="red", label="帕累托前沿", edgecolors="black", s=50)
+
+ax.set_xlabel("f1 (网络连接性)")
+ax.set_ylabel("f2 (覆盖率)")
+ax.set_zlabel("f3 (敏感度平均值)")
+ax.set_title("三维帕累托前沿图 (NSGA-II)")
+ax.legend()
+
+plt.savefig(r'D:\YZRD_UHI_data\pareto_front_3d_nsga2.png', dpi=300, bbox_inches='tight')
+plt.show()
+print("三维帕累托前沿图已保存到: D:\YZRD_UHI_data\pareto_front_3d_nsga2_M100.png")

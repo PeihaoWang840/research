@@ -1,0 +1,111 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.spatial.distance import cdist
+
+# 读取数据（保持不变）
+try:
+    existing_data = pd.read_excel(r"D:\冷源.xlsx")
+    existing_x_coords = existing_data['X'].values
+    existing_y_coords = existing_data['Y'].values
+
+    solution_space_data = pd.read_excel(r"D:\解空间.xlsx")
+    solution_space_coords = np.column_stack((solution_space_data['X'].values, solution_space_data['Y'].values))
+
+    df = pd.read_excel(r"D:\研究范围_去除660M缓冲.xlsx")
+    research_x_coords = df['X'].values
+    research_y_coords = df['Y'].values
+except Exception as e:
+    print(f"数据读取失败: {e}")
+    exit()
+
+# 参数设置
+M = 60  
+r = 660  
+r_squared = r ** 2  
+b_D = r * 3000  
+b_M = len(existing_x_coords)  
+alpha1 = 0.5  
+alpha2 = 0.5  
+num_ants = 50  # 蚂蚁数量
+num_iterations = 100  # 迭代次数
+tau = np.ones(len(solution_space_coords))  # 初始化信息素
+eta = np.ones(len(solution_space_coords))  # 启发信息
+rho = 0.1  # 信息素挥发率
+Q = 1  # 信息素更新参数
+
+# 目标函数
+def f1_calc(all_x_coords, all_y_coords, r, b_D, bn):
+    if bn <= 1:
+        return 0  
+    coords = np.column_stack((all_x_coords, all_y_coords))
+    dist_squared = cdist(coords, coords, 'sqeuclidean')
+    np.fill_diagonal(dist_squared, np.inf)
+    connectivity = np.exp(-dist_squared / max(b_D, 1e-5))
+    return 2 * connectivity.sum() / ((bn - 1) * bn)
+
+def f2_calc(new_x_coords, new_y_coords, research_x_coords, research_y_coords, r_squared):
+    new_coords = np.column_stack((new_x_coords, new_y_coords))
+    research_coords = np.column_stack((research_x_coords, research_y_coords))
+    dist_squared = cdist(research_coords, new_coords, 'sqeuclidean')
+    covered = np.any(dist_squared <= r_squared, axis=1)
+    return np.sum(covered) / len(research_coords)
+
+def total_fitness(f1, f2, alpha1, alpha2):
+    return alpha1 * f1 + alpha2 * f2
+
+# ACO 迭代优化
+g_best = None
+g_best_fitness = -np.inf
+
+for _ in range(num_iterations):
+    solutions = []
+    fitnesses = []
+    
+    for _ in range(num_ants):
+        selected_indices = np.random.choice(len(solution_space_coords), M, replace=False, p=tau / tau.sum())
+        solution = solution_space_coords[selected_indices]
+        solutions.append(solution)
+
+        all_x_coords = np.concatenate((existing_x_coords, solution[:, 0]))
+        all_y_coords = np.concatenate((existing_y_coords, solution[:, 1]))
+        
+        f1 = f1_calc(all_x_coords, all_y_coords, r, b_D, b_M + M)
+        f2 = f2_calc(solution[:, 0], solution[:, 1], research_x_coords, research_y_coords, r_squared)
+        fitness = total_fitness(f1, f2, alpha1, alpha2)
+        
+        fitnesses.append(fitness)
+        if fitness > g_best_fitness:
+            g_best = solution
+            g_best_fitness = fitness
+    
+    # 更新信息素
+    tau *= (1 - rho)  # 信息素挥发
+    for i, fitness in enumerate(fitnesses):
+        for idx in np.random.choice(len(solution_space_coords), M, replace=False):
+            tau[idx] += Q * (fitness / g_best_fitness)
+
+print(f"最优解的适应度值: {g_best_fitness}")
+
+# 计算帕累托前沿（保持不变）
+pareto_front = []
+pareto_solutions = []
+for i in range(len(fitnesses)):
+    dominated = False
+    for j in range(len(fitnesses)):
+        if (fitnesses[j] >= fitnesses[i]) and (fitnesses[j] > fitnesses[i]):
+            dominated = True
+            break
+    if not dominated:
+        pareto_front.append(fitnesses[i])
+        pareto_solutions.append(solutions[i])
+
+# 保存并绘制帕累托前沿（保持不变）
+pd.DataFrame(pareto_front).to_excel(r'D:\pareto_front_aco.xlsx', index=False)
+plt.scatter(range(len(pareto_front)), pareto_front, color="red", label="帕累托前沿")
+plt.xlabel("解序号")
+plt.ylabel("适应度")
+plt.legend()
+plt.grid()
+plt.savefig(r'D:\pareto_front_aco.png', dpi=300)
+plt.show()

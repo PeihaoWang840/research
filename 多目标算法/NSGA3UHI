@@ -1,0 +1,181 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
+from deap import base, creator, tools, algorithms
+from deap.tools.emo import selNSGA3, uniform_reference_points
+from mpl_toolkits.mplot3d import Axes3D
+from tqdm import tqdm   # ✅ 新增进度条库
+
+# ======================= 数据读取 =======================
+try:
+    existing_data = pd.read_excel(r"D:\YZRD_UHI_data\warmpeak.xlsx")
+    existing_x_coords = existing_data['X'].values
+    existing_y_coords = existing_data['Y'].values
+
+    solution_space_data = pd.read_excel(r"D:\YZRD_UHI_data\solutionspace.xlsx")
+    coords_array = np.column_stack((solution_space_data['X'].values, solution_space_data['Y'].values))
+    unique_coords, unique_indices = np.unique(coords_array, axis=0, return_index=True)
+    solution_space_coords = unique_coords
+    solution_sensitivity = solution_space_data['sensitivity'].values[unique_indices]
+
+    df = pd.read_excel(r"D:\YZRD_UHI_data\coverpoint.xlsx")
+    research_x_coords = df['X'].values
+    research_y_coords = df['Y'].values
+except Exception as e:
+    print(f"数据读取失败: {e}")
+    exit()
+
+# ======================= 参数设定 =======================
+M = 3000  # 新增布点数
+r = 1500
+r_squared = r ** 2
+b_D = r * 10000000
+b_M = len(existing_x_coords)
+alpha1 = 1
+alpha2 = 1
+alpha3 = 1
+bn = M + b_M
+
+# 构建 KDTree 加速空间查询
+solution_tree = cKDTree(solution_space_coords)
+
+# ======================= 目标函数 =======================
+def f1_calc(all_x_coords, all_y_coords, r, b_D, bn):
+    if bn <= 1:
+        return 0
+    coords = np.column_stack((all_x_coords, all_y_coords))
+    dist_squared = cdist(coords, coords, 'sqeuclidean')
+    np.fill_diagonal(dist_squared, np.inf)
+    connectivity = np.exp(-dist_squared / max(b_D, 1e-5))
+    return 2 * connectivity.sum() / ((bn - 1) * bn)
+
+def f2_calc(new_indices, research_x_coords, research_y_coords, solution_space_coords, r):
+    if len(new_indices) == 0:
+        return 0
+    selected_coords = solution_space_coords[new_indices]
+    selected_tree = cKDTree(selected_coords)
+
+    research_coords = np.column_stack((research_x_coords, research_y_coords))
+    covered = selected_tree.query_ball_point(research_coords, r)
+    covered_flags = [len(c) > 0 for c in covered]
+    return np.mean(covered_flags)
+
+def f3_calc(selected_indices, solution_sensitivity):
+    if len(selected_indices) == 0:
+        return 0
+    return np.mean(solution_sensitivity[selected_indices])
+
+# ======================= NSGA-III 初始化 =======================
+creator.create("FitnessMulti", base.Fitness, weights=(alpha1, alpha2, alpha3))
+creator.create("Individual", np.ndarray, fitness=creator.FitnessMulti)
+
+def init_individual():
+    indices = np.random.choice(len(solution_space_coords), M, replace=False)
+    return creator.Individual(indices)
+
+toolbox = base.Toolbox()
+toolbox.register("individual", init_individual)
+toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+def evaluate(ind):
+    new_indices = np.array(ind, dtype=int)
+    new_coords = solution_space_coords[new_indices]
+
+    all_x_coords = np.concatenate((existing_x_coords, new_coords[:, 0]))
+    all_y_coords = np.concatenate((existing_y_coords, new_coords[:, 1]))
+
+    f1 = f1_calc(all_x_coords, all_y_coords, r, b_D, b_M + M)
+    f2 = f2_calc(new_indices, research_x_coords, research_y_coords, solution_space_coords, r)
+    f3 = f3_calc(new_indices, solution_sensitivity)
+
+    return f1, f2, f3
+
+toolbox.register("evaluate", evaluate)
+toolbox.register("mate", tools.cxTwoPoint)
+
+def custom_mutation(individual, indpb=0.2):
+    for i in range(len(individual)):
+        if np.random.rand() < indpb:
+            new_idx = np.random.choice(len(solution_space_coords))
+            individual[i] = new_idx
+    return individual,
+
+toolbox.register("mutate", custom_mutation)
+
+# NSGA-III 参考点与选择器
+ref_points = uniform_reference_points(nobj=3, p=12)
+toolbox.register("select", selNSGA3, ref_points=ref_points)
+
+# ======================= 演化过程 =======================
+pop_size = 200
+num_generations = 200
+pop = toolbox.population(n=pop_size)
+
+invalid_ind = [ind for ind in pop if not ind.fitness.valid]
+fitnesses = list(map(toolbox.evaluate, invalid_ind))
+for ind, fit in zip(invalid_ind, fitnesses):
+    ind.fitness.values = fit
+
+# ✅ 加入 tqdm 进度条
+for gen in tqdm(range(num_generations), desc="NSGA-III 进化中", unit="代"):
+    offspring = [toolbox.clone(ind) for ind in pop]
+
+    for ind1, ind2 in zip(offspring[::2], offspring[1::2]):
+        if np.random.rand() < 0.7:
+            toolbox.mate(ind1, ind2)
+            del ind1.fitness.values, ind2.fitness.values
+
+    for mutant in offspring:
+        if np.random.rand() < 0.2:
+            toolbox.mutate(mutant)
+            del mutant.fitness.values
+
+    invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+    fitnesses = list(map(toolbox.evaluate, invalid_ind))
+    for ind, fit in zip(invalid_ind, fitnesses):
+        ind.fitness.values = fit
+
+    pop = toolbox.select(pop + offspring, k=pop_size)
+
+# ======================= 结果保存 =======================
+pareto_front = tools.sortNondominated(pop, len(pop), first_front_only=True)[0]
+pareto_solutions = [ind for ind in pareto_front]
+pareto_data = []
+for ind in pareto_solutions:
+    f1, f2, f3 = ind.fitness.values
+    for j, idx in enumerate(ind):
+        x, y = solution_space_coords[idx]
+        pareto_data.append([f1, f2, f3, j+1, x, y])
+
+pareto_df = pd.DataFrame(pareto_data, columns=['f1', 'f2', 'f3', '点序号', 'X', 'Y'])
+pareto_df.to_excel(r'D:\YZRD_UHI_data\pareto_front_a4.xlsx', index=False)
+print("帕累托前沿解已保存到: D:\YZRD_UHI_data\pareto_front_nsga3_with_f3_M3000.xlsx")
+
+# ======================= 3D 可视化 =======================
+f1_list, f2_list, f3_list = zip(*[ind.fitness.values for ind in pop])
+pareto_f1, pareto_f2, pareto_f3 = zip(*[ind.fitness.values for ind in pareto_solutions])
+
+fig = plt.figure(figsize=(10, 8))
+ax = fig.add_subplot(111, projection='3d')
+ax.scatter(f1_list, f2_list, f3_list, label="所有解", alpha=0.3, color="gray")
+ax.scatter(pareto_f1, pareto_f2, pareto_f3, color="red", label="帕累托前沿", edgecolors="black", s=50)
+
+ax.set_xlabel("f1 (网络连接性)")
+ax.set_ylabel("f2 (覆盖率)")
+ax.set_zlabel("f3 (敏感度平均值)")
+ax.set_title("三维帕累托前沿图 (NSGA-III)")
+ax.legend()
+
+plt.savefig(r'D:\YZRD_UHI_data\pareto_front_a4.png', dpi=300, bbox_inches='tight')
+plt.show()
+print("三维帕累托前沿图已保存到: D:\YZRD_UHI_data\pareto_front_3d_nsga3.png")
+
+# ======================= 打印最后一代的最大 FitnessMulti =======================
+fitness_values = [
+    f1 * alpha1 + f2 * alpha2 + f3 * alpha3
+    for f1, f2, f3 in (ind.fitness.values for ind in pop)
+]
+max_fitness = max(fitness_values)
+print(f"\n最终一代的最大综合适应度 (f1*α1 + f2*α2 + f3*α3): {max_fitness:.6f}")
